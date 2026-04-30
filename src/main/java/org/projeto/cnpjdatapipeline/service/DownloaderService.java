@@ -76,7 +76,7 @@ public class DownloaderService {
     }
 
     public List<Path> downloadFile(String month, String zipFilename) throws Exception {
-        Path tempDir = Path.of(config.getTempDir());
+        Path tempDir = Path.of(config.getTempDir()).toAbsolutePath().normalize();
         Files.createDirectories(tempDir);
 
         Path zipPath = tempDir.resolve(zipFilename);
@@ -89,19 +89,22 @@ public class DownloaderService {
         // Download URL: base_url/month/filename  (same as Python)
         String url = config.getBaseUrl() + "/" + month + "/" + zipFilename;
 
+        // Retry only the download — extraction errors are not retried
         for (int attempt = 1; attempt <= config.getRetryAttempts(); attempt++) {
             try {
                 System.out.printf("[DOWNLOAD] %s (attempt %d/%d)%n",
                         zipFilename, attempt, config.getRetryAttempts());
                 downloadToFile(url, zipPath);
-                return extractZip(zipPath, tempDir);
+                break;
             } catch (Exception e) {
                 if (attempt == config.getRetryAttempts()) throw e;
-                System.err.println("[RETRY] " + e.getMessage());
+                System.err.printf("[RETRY] Download failed (%s), waiting %ds...%n",
+                        e.getMessage(), config.getRetryDelaySeconds() * attempt);
                 Thread.sleep(config.getRetryDelaySeconds() * 1000L * attempt);
             }
         }
-        throw new RuntimeException("Download failed after retries: " + zipFilename);
+
+        return extractZip(zipPath, tempDir);
     }
 
     private Document propfind(String path) throws Exception {
@@ -143,6 +146,7 @@ public class DownloaderService {
     }
 
     private List<Path> extractZip(Path zipPath, Path destDir) throws Exception {
+        // destDir must already be absolute+normalized (done in downloadFile)
         List<Path> extracted = new ArrayList<>();
 
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(Files.newInputStream(zipPath)))) {
@@ -154,11 +158,12 @@ public class DownloaderService {
                             .anyMatch(nameUpper::contains);
 
                     if (isCnpjFile) {
-                        Path outPath = destDir.resolve(entry.getName()).normalize();
+                        // Use only the filename, ignoring any directory part inside the ZIP
+                        String safeFilename = Path.of(entry.getName()).getFileName().toString();
+                        Path outPath = destDir.resolve(safeFilename);
                         if (!outPath.startsWith(destDir)) {
                             throw new SecurityException("Zip slip detected: " + entry.getName());
                         }
-                        Files.createDirectories(outPath.getParent());
                         Files.copy(zis, outPath, StandardCopyOption.REPLACE_EXISTING);
                         extracted.add(outPath);
                         System.out.println("[EXTRACT] " + outPath.getFileName());
