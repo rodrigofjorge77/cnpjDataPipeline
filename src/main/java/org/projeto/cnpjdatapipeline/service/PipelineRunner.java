@@ -90,7 +90,7 @@ public class PipelineRunner implements ApplicationRunner {
             processGroup(groupFiles, targetMonth);
         }
 
-        downloader.cleanup(targetMonth);
+        downloader.cleanup();
         System.out.println("[PIPELINE] Done!");
     }
 

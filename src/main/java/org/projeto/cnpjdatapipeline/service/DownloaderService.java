@@ -14,72 +14,69 @@ import java.net.http.HttpResponse;
 import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipInputStream;
+import java.util.Base64;
 
 @Service
 public class DownloaderService {
 
+    private static final Pattern MONTH_PATTERN = Pattern.compile("(\\d{4}-\\d{2})/?$");
+    private static final Pattern ZIP_PATTERN = Pattern.compile("/([^/]+\\.zip)$", Pattern.CASE_INSENSITIVE);
+    private static final List<String> CNPJ_FILE_PATTERNS = List.of(
+            "CNAECSV", "MOTICSV", "MUNICCSV", "NATJUCSV", "PAISCSV",
+            "QUALSCSV", "EMPRECSV", "ESTABELE", "SOCIOCSV", "SIMPLES"
+    );
+
     private final PipelineConfig config;
     private final HttpClient httpClient;
+    private final String basicAuth;
 
     public DownloaderService(PipelineConfig config) {
         this.config = config;
         this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(config.getRetryDelaySeconds() * 10L))
+                .connectTimeout(Duration.ofSeconds(30))
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
+        // Basic auth: username=shareToken, password="" (same as Python: auth=(token, ""))
+        String credentials = config.getShareToken() + ":";
+        this.basicAuth = "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes());
     }
 
     public List<String> getAvailableDirectories() throws Exception {
-        String propfindUrl = config.getBaseUrl() + "/download?path=/&files=";
-        String webdavUrl = buildWebDavUrl("/");
-
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(webdavUrl))
-                .method("PROPFIND", HttpRequest.BodyPublishers.noBody())
-                .header("Depth", "1")
-                .timeout(Duration.ofSeconds(60))
-                .build();
-
-        HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-
-        if (response.statusCode() != 207) {
-            throw new RuntimeException("PROPFIND failed: HTTP " + response.statusCode());
+        Document doc = propfind("");
+        NodeList hrefs = doc.getElementsByTagNameNS("DAV:", "href");
+        List<String> dirs = new ArrayList<>();
+        for (int i = 0; i < hrefs.getLength(); i++) {
+            String href = hrefs.item(i).getTextContent();
+            Matcher m = MONTH_PATTERN.matcher(href);
+            if (m.find()) dirs.add(m.group(1));
         }
-
-        return parseDirectoriesFromWebDav(response.body());
+        if (dirs.isEmpty()) throw new RuntimeException("No data directories found");
+        Collections.sort(dirs);
+        return dirs;
     }
 
     public String getLatestDirectory() throws Exception {
         List<String> dirs = getAvailableDirectories();
-        return dirs.stream()
-                .filter(d -> d.matches("\\d{4}-\\d{2}"))
-                .sorted(Comparator.reverseOrder())
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("No directories found"));
+        return dirs.get(dirs.size() - 1);
     }
 
     public List<String> getDirectoryFiles(String month) throws Exception {
-        String webdavUrl = buildWebDavUrl("/" + month + "/");
-
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(webdavUrl))
-                .method("PROPFIND", HttpRequest.BodyPublishers.noBody())
-                .header("Depth", "1")
-                .timeout(Duration.ofSeconds(60))
-                .build();
-
-        HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-
-        if (response.statusCode() != 207) {
-            throw new RuntimeException("PROPFIND failed for " + month + ": HTTP " + response.statusCode());
+        Document doc = propfind(month);
+        NodeList hrefs = doc.getElementsByTagNameNS("DAV:", "href");
+        List<String> files = new ArrayList<>();
+        for (int i = 0; i < hrefs.getLength(); i++) {
+            String href = hrefs.item(i).getTextContent();
+            Matcher m = ZIP_PATTERN.matcher(href);
+            if (m.find()) files.add(m.group(1));
         }
-
-        return parseFilesFromWebDav(response.body());
+        return files;
     }
 
     public List<Path> downloadFile(String month, String zipFilename) throws Exception {
-        Path tempDir = Path.of(config.getTempDir(), month);
+        Path tempDir = Path.of(config.getTempDir());
         Files.createDirectories(tempDir);
 
         Path zipPath = tempDir.resolve(zipFilename);
@@ -89,12 +86,14 @@ public class DownloaderService {
             return extractZip(zipPath, tempDir);
         }
 
-        String downloadUrl = config.getBaseUrl() + "/download?path=/" + month + "/&files=" + zipFilename;
+        // Download URL: base_url/month/filename  (same as Python)
+        String url = config.getBaseUrl() + "/" + month + "/" + zipFilename;
 
         for (int attempt = 1; attempt <= config.getRetryAttempts(); attempt++) {
             try {
-                System.out.printf("[DOWNLOAD] %s (attempt %d/%d)%n", zipFilename, attempt, config.getRetryAttempts());
-                downloadToFile(downloadUrl, zipPath);
+                System.out.printf("[DOWNLOAD] %s (attempt %d/%d)%n",
+                        zipFilename, attempt, config.getRetryAttempts());
+                downloadToFile(url, zipPath);
                 return extractZip(zipPath, tempDir);
             } catch (Exception e) {
                 if (attempt == config.getRetryAttempts()) throw e;
@@ -105,10 +104,32 @@ public class DownloaderService {
         throw new RuntimeException("Download failed after retries: " + zipFilename);
     }
 
+    private Document propfind(String path) throws Exception {
+        // URL: base_url/path/ (trailing slash required)
+        String url = (config.getBaseUrl() + "/" + path).replaceAll("/+$", "") + "/";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .method("PROPFIND", HttpRequest.BodyPublishers.noBody())
+                .header("Authorization", basicAuth)
+                .header("Depth", "1")
+                .timeout(Duration.ofSeconds(60))
+                .build();
+
+        HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+
+        if (response.statusCode() != 207) {
+            throw new RuntimeException("PROPFIND failed: HTTP " + response.statusCode() + " for " + url);
+        }
+
+        return DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(response.body());
+    }
+
     private void downloadToFile(String url, Path dest) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .GET()
+                .header("Authorization", basicAuth)
                 .timeout(Duration.ofSeconds(600))
                 .build();
 
@@ -126,14 +147,20 @@ public class DownloaderService {
             var entry = zis.getNextEntry();
             while (entry != null) {
                 if (!entry.isDirectory()) {
-                    Path outPath = destDir.resolve(entry.getName()).normalize();
-                    if (!outPath.startsWith(destDir)) {
-                        throw new SecurityException("Zip slip detected: " + entry.getName());
+                    String nameUpper = entry.getName().toUpperCase();
+                    boolean isCnpjFile = CNPJ_FILE_PATTERNS.stream()
+                            .anyMatch(nameUpper::contains);
+
+                    if (isCnpjFile) {
+                        Path outPath = destDir.resolve(entry.getName()).normalize();
+                        if (!outPath.startsWith(destDir)) {
+                            throw new SecurityException("Zip slip detected: " + entry.getName());
+                        }
+                        Files.createDirectories(outPath.getParent());
+                        Files.copy(zis, outPath, StandardCopyOption.REPLACE_EXISTING);
+                        extracted.add(outPath);
+                        System.out.println("[EXTRACT] " + outPath.getFileName());
                     }
-                    Files.createDirectories(outPath.getParent());
-                    Files.copy(zis, outPath, StandardCopyOption.REPLACE_EXISTING);
-                    extracted.add(outPath);
-                    System.out.println("[EXTRACT] " + outPath.getFileName());
                 }
                 zis.closeEntry();
                 entry = zis.getNextEntry();
@@ -147,9 +174,9 @@ public class DownloaderService {
         return extracted;
     }
 
-    public void cleanup(String month) {
+    public void cleanup() {
         if (config.isKeepDownloadedFiles()) return;
-        Path tempDir = Path.of(config.getTempDir(), month);
+        Path tempDir = Path.of(config.getTempDir());
         deleteDirectory(tempDir);
     }
 
@@ -162,39 +189,5 @@ public class DownloaderService {
         } catch (IOException e) {
             System.err.println("[WARN] Could not delete temp dir: " + e.getMessage());
         }
-    }
-
-    private String buildWebDavUrl(String path) {
-        return config.getBaseUrl().replace("/index.php/s/", "/index.php/s/") + "/webdav" + path;
-    }
-
-    private List<String> parseDirectoriesFromWebDav(InputStream body) throws Exception {
-        Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(body);
-        NodeList hrefs = doc.getElementsByTagNameNS("DAV:", "href");
-        List<String> dirs = new ArrayList<>();
-        for (int i = 0; i < hrefs.getLength(); i++) {
-            String href = hrefs.item(i).getTextContent();
-            String[] parts = href.split("/");
-            if (parts.length > 0) {
-                String last = parts[parts.length - 1];
-                if (last.matches("\\d{4}-\\d{2}")) dirs.add(last);
-            }
-        }
-        return dirs;
-    }
-
-    private List<String> parseFilesFromWebDav(InputStream body) throws Exception {
-        Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(body);
-        NodeList hrefs = doc.getElementsByTagNameNS("DAV:", "href");
-        List<String> files = new ArrayList<>();
-        for (int i = 0; i < hrefs.getLength(); i++) {
-            String href = hrefs.item(i).getTextContent();
-            String[] parts = href.split("/");
-            if (parts.length > 0) {
-                String last = parts[parts.length - 1];
-                if (last.endsWith(".zip") || last.endsWith(".ZIP")) files.add(last);
-            }
-        }
-        return files;
     }
 }
