@@ -110,9 +110,23 @@ public class PipelineRunner implements ApplicationRunner {
         }
 
         executor.shutdown();
+        Exception firstFailure = null;
         for (Future<?> f : futures) {
-            f.get(); // propagates exceptions
+            try {
+                f.get();
+            } catch (java.util.concurrent.ExecutionException e) {
+                Throwable cause = e.getCause();
+                System.err.println("[ERROR] " + cause.getMessage());
+                if (cause.getCause() != null) {
+                    System.err.println("[ERROR] Caused by: " + cause.getCause().getMessage());
+                    cause.getCause().printStackTrace(System.err);
+                } else {
+                    cause.printStackTrace(System.err);
+                }
+                if (firstFailure == null) firstFailure = (Exception) cause;
+            }
         }
+        if (firstFailure != null) throw firstFailure;
     }
 
     private void processZipFile(String zipFilename, String month) throws Exception {
