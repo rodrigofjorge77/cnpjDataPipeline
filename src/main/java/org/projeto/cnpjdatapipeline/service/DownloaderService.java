@@ -122,7 +122,9 @@ public class DownloaderService {
             throw new RuntimeException("PROPFIND failed: HTTP " + response.statusCode() + " for " + url);
         }
 
-        return DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(response.body());
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        return factory.newDocumentBuilder().parse(response.body());
     }
 
     private void downloadToFile(String url, Path dest) throws Exception {
