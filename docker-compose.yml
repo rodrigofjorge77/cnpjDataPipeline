@@ -1,0 +1,37 @@
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cnpj
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cnpj"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pipeline:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/cnpj
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      LOADING_STRATEGY: ${LOADING_STRATEGY:-upsert}
+      BATCH_SIZE: ${BATCH_SIZE:-500000}
+      DOWNLOAD_WORKERS: ${DOWNLOAD_WORKERS:-4}
+      PROCESS_WORKERS: ${PROCESS_WORKERS:-1}
+      KEEP_DOWNLOADED_FILES: ${KEEP_DOWNLOADED_FILES:-false}
+    volumes:
+      - ./temp:/app/temp
+
+volumes:
+  postgres_data:

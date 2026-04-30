@@ -139,7 +139,37 @@ erDiagram
 
 - Java 17+
 - Maven 3.8+ (ou use o `mvnw` incluído)
-- PostgreSQL 14+
+- PostgreSQL 14+ **ou** Docker + Docker Compose
+
+---
+
+## Configuração rápida com Docker
+
+A forma mais simples de rodar é com Docker Compose, que sobe o PostgreSQL automaticamente:
+
+```bash
+# 1. Build do JAR
+./mvnw clean package -DskipTests
+
+# 2. Subir apenas o banco de dados
+docker compose up -d postgres
+
+# 3. Listar meses disponíveis
+java -jar target/cnpjDataPipeline-0.0.1-SNAPSHOT.jar --list
+
+# 4. Processar o mês mais recente
+java -jar target/cnpjDataPipeline-0.0.1-SNAPSHOT.jar
+
+# 5. Ou rodar tudo via Docker (pipeline + banco)
+docker compose run --rm pipeline
+docker compose run --rm pipeline --list
+docker compose run --rm pipeline --month=2024-11
+```
+
+> **Sem Docker:** certifique-se de ter um PostgreSQL rodando e crie o banco `cnpj` antes de executar.
+> ```sql
+> CREATE DATABASE cnpj;
+> ```
 
 ---
 
