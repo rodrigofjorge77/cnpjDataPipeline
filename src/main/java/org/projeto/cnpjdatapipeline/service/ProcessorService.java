@@ -10,7 +10,6 @@ import org.springframework.stereotype.Service;
 
 import java.io.*;
 import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -43,30 +42,7 @@ public class ProcessorService {
 
     public void processCsvFile(Path csvPath, FileType fileType, Consumer<CsvBatch> batchConsumer) throws Exception {
         System.out.printf("[PROCESS] %s → %s%n", csvPath.getFileName(), fileType.getTableName());
-
-        Path utf8Path = convertToUtf8(csvPath);
-        try {
-            readAndBatch(utf8Path, fileType, batchConsumer);
-        } finally {
-            if (!utf8Path.equals(csvPath)) {
-                Files.deleteIfExists(utf8Path);
-            }
-        }
-    }
-
-    private Path convertToUtf8(Path source) throws IOException {
-        Path dest = source.resolveSibling(source.getFileName() + ".utf8.csv");
-        try (InputStream in = new BufferedInputStream(Files.newInputStream(source), 50 * 1024 * 1024);
-             OutputStream out = new BufferedOutputStream(Files.newOutputStream(dest))) {
-            byte[] buf = new byte[8192];
-            int read;
-            StringBuilder sb = new StringBuilder();
-            while ((read = in.read(buf)) != -1) {
-                sb.append(new String(buf, 0, read, SOURCE_CHARSET));
-            }
-            out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
-        }
-        return dest;
+        readAndBatch(csvPath, fileType, batchConsumer);
     }
 
     private void readAndBatch(Path csvPath, FileType fileType, Consumer<CsvBatch> consumer) throws Exception {
@@ -76,7 +52,12 @@ public class ProcessorService {
                 .setTrim(true)
                 .build();
 
-        try (BufferedReader reader = Files.newBufferedReader(csvPath, StandardCharsets.UTF_8);
+        // Read ISO-8859-1 directly — Java's InputStreamReader converts to Unicode
+        // in streaming fashion with no intermediate file or full-file allocation
+        try (BufferedReader reader = new BufferedReader(
+                     new InputStreamReader(
+                             new BufferedInputStream(Files.newInputStream(csvPath), 1024 * 1024),
+                             SOURCE_CHARSET));
              CSVParser parser = format.parse(reader)) {
 
             List<String[]> batch = new ArrayList<>(config.getBatchSize());
