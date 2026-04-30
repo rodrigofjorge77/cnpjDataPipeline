@@ -1,6 +1,6 @@
 # CNPJ Data Pipeline
 
-ETL em Java Spring Boot que baixa os dados públicos de empresas da **Receita Federal do Brasil** via WebDAV e os carrega em um banco PostgreSQL. Réplica fiel do pipeline Python original, com suporte a estratégias de carga incremental (upsert) e total (replace).
+ETL em Java Spring Boot que baixa os dados públicos de empresas da **Receita Federal do Brasil** via WebDAV e os carrega em um banco PostgreSQL.
 
 ---
 
